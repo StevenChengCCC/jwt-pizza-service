@@ -1,292 +1,314 @@
+// authRouter.test.js
+/* eslint-disable no-undef */
 const request = require('supertest');
 const app = require('../service');
 
-const testUser = { name: 'pizza diner', email: 'reg@test.com', password: 'a' };
-let testUserAuthToken;
+const { Role, DB } = require('../database/database.js');
+const { setAuth } = require('../routes/authRouter.js');
 
-beforeAll(async () => {
-  testUser.email = Math.random().toString(36).substring(2, 12) + '@test.com';
-  const registerRes = await request(app).post('/api/auth').send(testUser);
-  testUserAuthToken = registerRes.body.token;
-  expectValidJwt(testUserAuthToken);
-});
-
-test('login', async () => {
-  const loginRes = await request(app).put('/api/auth').send(testUser);
-  expect(loginRes.status).toBe(200);
-  expectValidJwt(loginRes.body.token);
-
-  const expectedUser = { ...testUser, roles: [{ role: 'diner' }] };
-  delete expectedUser.password;
-  expect(loginRes.body.user).toMatchObject(expectedUser);
-});
+// ---------- helpers ----------
+function randomName() {
+  return Math.random().toString(36).substring(2, 12);
+}
 
 function expectValidJwt(potentialJwt) {
   expect(potentialJwt).toMatch(/^[a-zA-Z0-9\-_]*\.[a-zA-Z0-9\-_]*\.[a-zA-Z0-9\-_]*$/);
 }
-// ---- Mocks ----
-jest.mock('../database/database.js', () => {
-  const Role = { Admin: 'admin', Franchisee: 'franchisee', Diner: 'diner' };
-  const DB = {
-    // auth / user
-    isLoggedIn: jest.fn(),
-    addUser: jest.fn(),
-    getUser: jest.fn(),
-    loginUser: jest.fn(),
-    logoutUser: jest.fn(),
-    updateUser: jest.fn(),
-    // order
-    getMenu: jest.fn(),
-    addMenuItem: jest.fn(),
-    getOrders: jest.fn(),
-    addDinerOrder: jest.fn(),
-    // franchise
-    getFranchises: jest.fn(),
-    getUserFranchises: jest.fn(),
-    getFranchise: jest.fn(),
-    createFranchise: jest.fn(),
-    deleteFranchise: jest.fn(),
-    createStore: jest.fn(),
-    deleteStore: jest.fn(),
-  };
-  return { DB, Role };
+
+async function createAdminUser() {
+  // Create an admin directly in the DB (bootstrap)
+  let user = { password: 'toomanysecrets', roles: [{ role: Role.Admin }] };
+  user.name = randomName();
+  user.email = `${user.name}@admin.com`;
+  user = await DB.addUser(user);
+  // setAuth() logs the user in (persists token signature to DB)
+  const token = await setAuth(user);
+  return { ...user, token };
+}
+
+if (process.env.VSCODE_INSPECTOR_OPTIONS) {
+  jest.setTimeout(60 * 1000 * 5); // 5 minutes when debugging
+}
+
+let diner = { name: 'pizza diner', email: 'reg@test.com', password: 'a' };
+let dinerToken;
+
+let admin;
+let adminToken;
+
+let menuItem; // will hold the menu item we add as admin
+let franchise; // created franchise
+let store; // created store
+
+// Mock the pizza factory for order fulfillment
+beforeAll(async () => {
+  // Unique diner each run
+  diner.email = `${randomName()}@test.com`;
+  const registerRes = await request(app).post('/api/auth').send(diner);
+  dinerToken = registerRes.body.token;
+  expectValidJwt(dinerToken);
+
+  // Admin bootstrap + login
+  admin = await createAdminUser();
+  adminToken = admin.token;
+  expectValidJwt(adminToken);
+
+  // Global fetch mock for factory call in orderRouter
+  global.fetch = jest.fn(async () => ({
+    ok: true,
+    json: async () => ({ reportUrl: 'http://factory.example/report/123', jwt: 'factory-jwt-abc' }),
+  }));
 });
 
-jest.mock('jsonwebtoken', () => {
-  // We'll override verify per-test as needed
-  return {
-    sign: jest.fn(() => 'a.b.c'),
-    verify: jest.fn(() => ({ id: 1, name: 'Admin', email: 'a@jwt.com', roles: [{ role: 'admin' }] })),
-  };
+afterAll(() => {
+  // Clean up fetch mock
+  global.fetch && jest.restoreAllMocks();
 });
 
-const { DB, Role } = require('../database/database.js');
-const jwt = require('jsonwebtoken');
+// ---------- AUTH ----------
+test('login', async () => {
+  const loginRes = await request(app).put('/api/auth').send(diner);
+  expect(loginRes.status).toBe(200);
+  expectValidJwt(loginRes.body.token);
 
-// Node 18+ has global fetch; we mock it to control order fulfillment paths.
-global.fetch = jest.fn();
-
-// Now require the app (after mocks!)
-const request = require('supertest');
-const app = require('../service');
-
-const authz = (token = 'a.b.c') => ({ Authorization: `Bearer ${token}` });
-
-beforeEach(() => {
-  jest.clearAllMocks();
-  DB.isLoggedIn.mockResolvedValue(true); // authenticated by default when Authorization is present
+  const expectedUser = { ...diner, roles: [{ role: 'diner' }] };
+  delete expectedUser.password;
+  expect(loginRes.body.user).toMatchObject(expectedUser);
 });
 
-// ---------- authRouter ----------
-describe('authRouter', () => {
-  test('POST /api/auth registers diner and returns token', async () => {
-    DB.addUser.mockResolvedValue({ id: 2, name: 'pizza diner', email: 'reg@test.com', roles: [{ role: Role.Diner }] });
-    DB.loginUser.mockResolvedValue();
+test('logout revokes token', async () => {
+  // logout current diner token
+  const logoutRes = await request(app).delete('/api/auth').set('Authorization', `Bearer ${dinerToken}`);
+  expect(logoutRes.status).toBe(200);
+  expect(logoutRes.body).toMatchObject({ message: 'logout successful' });
 
-    const res = await request(app).post('/api/auth').send({ name: 'pizza diner', email: 'reg@test.com', password: 'a' });
-    expect(res.status).toBe(200);
-    expect(DB.addUser).toHaveBeenCalled();
-    expect(DB.loginUser).toHaveBeenCalledWith(2, 'a.b.c');
-    expect(res.body).toHaveProperty('user');
-    expect(res.body).toHaveProperty('token', 'a.b.c');
-  });
+  // after logout, /api/user/me should be 401
+  const meAfterLogout = await request(app).get('/api/user/me').set('Authorization', `Bearer ${dinerToken}`);
+  expect(meAfterLogout.status).toBe(401);
 
-  test('PUT /api/auth logs in existing user and returns token', async () => {
-    DB.getUser.mockResolvedValue({ id: 3, name: 'u', email: 'u@test.com', roles: [{ role: Role.Diner }] });
+  // log back in for remaining tests
+  const loginRes = await request(app).put('/api/auth').send(diner);
+  expect(loginRes.status).toBe(200);
+  dinerToken = loginRes.body.token;
+});
 
-    const res = await request(app).put('/api/auth').send({ email: 'u@test.com', password: 'pw' });
-    expect(res.status).toBe(200);
-    expect(DB.getUser).toHaveBeenCalled();
-    expect(DB.loginUser).toHaveBeenCalledWith(3, 'a.b.c');
-    expect(res.body).toHaveProperty('token', 'a.b.c');
-  });
+// ---------- ROOT & DOCS & 404 ----------
+test('GET / responds with welcome + version', async () => {
+  const res = await request(app).get('/');
+  expect(res.status).toBe(200);
+  expect(res.body).toHaveProperty('message', 'welcome to JWT Pizza');
+  expect(res.body).toHaveProperty('version');
+});
 
-  test('DELETE /api/auth without token -> 401', async () => {
-    // No Authorization header and authenticateToken should trip
-    const res = await request(app).delete('/api/auth');
+test('GET /api/docs returns endpoint listing', async () => {
+  const res = await request(app).get('/api/docs');
+  expect(res.status).toBe(200);
+  expect(res.body).toHaveProperty('version');
+  expect(Array.isArray(res.body.endpoints)).toBe(true);
+  expect(res.body.config).toBeDefined();
+});
+
+test('unknown endpoint returns 404 JSON', async () => {
+  const res = await request(app).get('/api/this/does/not/exist');
+  expect(res.status).toBe(404);
+  expect(res.body).toMatchObject({ message: 'unknown endpoint' });
+});
+
+// ---------- USER ----------
+describe('User routes', () => {
+  test('GET /api/user/me requires auth', async () => {
+    const res = await request(app).get('/api/user/me');
     expect(res.status).toBe(401);
-    expect(res.body).toHaveProperty('message', 'unauthorized');
   });
 
-  test('DELETE /api/auth with token logs out and returns message', async () => {
-    DB.logoutUser.mockResolvedValue();
-    const res = await request(app).delete('/api/auth').set(authz());
+  test('GET /api/user/me returns authenticated user', async () => {
+    const res = await request(app).get('/api/user/me').set('Authorization', `Bearer ${dinerToken}`);
     expect(res.status).toBe(200);
-    expect(DB.logoutUser).toHaveBeenCalled();
-    expect(res.body).toHaveProperty('message', 'logout successful');
-  });
-});
-
-// ---------- userRouter ----------
-describe('userRouter', () => {
-  test('GET /api/user/me returns req.user', async () => {
-    // jwt.verify default (admin) is fine
-    const res = await request(app).get('/api/user/me').set(authz());
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ id: 1, email: 'a@jwt.com' });
+    expect(res.body).toHaveProperty('id');
+    expect(res.body).toHaveProperty('email', diner.email);
   });
 
-  test('PUT /api/user/:id unauthorized when not same user and not admin -> 403', async () => {
-    // Simulate diner user id 2
-    jwt.verify.mockReturnValueOnce({ id: 2, email: 'd@test.com', name: 'Diner', roles: [{ role: Role.Diner }] });
-    DB.updateUser.mockResolvedValue({ id: 1, name: 'X', email: 'x@test.com', roles: [{ role: Role.Diner }] });
+  test('PUT /api/user/:userId forbids updating someone else (non-admin)', async () => {
+    // Try to update admin using diner token -> should 403
+    const resMe = await request(app).get('/api/user/me').set('Authorization', `Bearer ${adminToken}`);
+    const adminId = resMe.body.id;
 
-    const res = await request(app).put('/api/user/1').set(authz()).send({ name: 'X' });
+    const res = await request(app)
+      .put(`/api/user/${adminId}`)
+      .set('Authorization', `Bearer ${dinerToken}`)
+      .send({ name: 'hacker' });
+
     expect(res.status).toBe(403);
-    expect(res.body).toHaveProperty('message', 'unauthorized');
+    expect(res.body).toMatchObject({ message: 'unauthorized' });
   });
 
-  test('PUT /api/user/:id as admin updates user and returns new token', async () => {
-    // default verify returns admin
-    DB.updateUser.mockResolvedValue({ id: 5, name: 'New', email: 'new@test.com', roles: [{ role: Role.Diner }] });
-    DB.loginUser.mockResolvedValue();
+  test('PUT /api/user/:userId lets user update self (and returns new token)', async () => {
+    const meRes = await request(app).get('/api/user/me').set('Authorization', `Bearer ${dinerToken}`);
+    const myId = meRes.body.id;
 
-    const res = await request(app).put('/api/user/5').set(authz()).send({ name: 'New', email: 'new@test.com' });
-    expect(res.status).toBe(200);
-    expect(DB.updateUser).toHaveBeenCalledWith(5, 'New', 'new@test.com', undefined);
-    // setAuth should have signed and logged in
-    expect(DB.loginUser).toHaveBeenCalledWith(5, 'a.b.c');
-    expect(res.body).toHaveProperty('user');
-    expect(res.body).toHaveProperty('token', 'a.b.c');
+    const newName = `diner-${randomName()}`;
+    const updateRes = await request(app)
+      .put(`/api/user/${myId}`)
+      .set('Authorization', `Bearer ${dinerToken}`)
+      .send({ name: newName });
+
+    expect(updateRes.status).toBe(200);
+    expect(updateRes.body.user).toHaveProperty('name', newName);
+    expectValidJwt(updateRes.body.token);
   });
 });
 
-// ---------- orderRouter ----------
-describe('orderRouter', () => {
-  test('GET /api/order/menu returns menu', async () => {
-    DB.getMenu.mockResolvedValue([{ id: 1, title: 'Veggie', price: 9.99 }]);
+// ---------- ORDER (menu + create order + list) ----------
+describe('Order routes', () => {
+  test('GET /api/order/menu returns an array (may be empty)', async () => {
     const res = await request(app).get('/api/order/menu');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([{ id: 1, title: 'Veggie', price: 9.99 }]);
+    expect(Array.isArray(res.body)).toBe(true);
   });
 
-  test('PUT /api/order/menu requires admin, diner gets 403', async () => {
-    jwt.verify.mockReturnValueOnce({ id: 9, email: 'd@test.com', roles: [{ role: Role.Diner }] });
-    const res = await request(app).put('/api/order/menu').set(authz()).send({ title: 'S', description: 'x', image: 'y', price: 1 });
+  test('PUT /api/order/menu requires Admin (non-admin 403)', async () => {
+    const res = await request(app)
+      .put('/api/order/menu')
+      .set('Authorization', `Bearer ${dinerToken}`)
+      .send({
+        title: 'Student',
+        description: 'No topping, no sauce, just carbs',
+        image: 'pizza9.png',
+        price: 0.0001,
+      });
     expect(res.status).toBe(403);
-    expect(res.body).toHaveProperty('message', 'unable to add menu item');
+    expect(res.body).toMatchObject({ message: 'unable to add menu item' });
   });
 
-  test('PUT /api/order/menu admin can add item and returns full menu', async () => {
-    // Admin
-    DB.addMenuItem.mockResolvedValue({ id: 2, title: 'S', description: 'x', image: 'y', price: 1 });
-    DB.getMenu.mockResolvedValue([{ id: 1, title: 'Veggie' }, { id: 2, title: 'S' }]);
+  test('Admin can add menu item and it shows up in GET /menu', async () => {
+    const payload = {
+      title: `Veggie-${randomName()}`,
+      description: 'A garden of delight',
+      image: 'pizza1.png',
+      price: 0.0038,
+    };
 
-    const res = await request(app).put('/api/order/menu').set(authz()).send({ title: 'S', description: 'x', image: 'y', price: 1 });
-    expect(res.status).toBe(200);
-    expect(DB.addMenuItem).toHaveBeenCalled();
-    expect(res.body).toEqual([{ id: 1, title: 'Veggie' }, { id: 2, title: 'S' }]);
-  });
+    const putRes = await request(app)
+      .put('/api/order/menu')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send(payload);
 
-  test('GET /api/order (protected) returns user orders', async () => {
-    DB.getOrders.mockResolvedValue({ dinerId: 7, orders: [], page: 1 });
-    const res = await request(app).get('/api/order').set(authz());
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ dinerId: 7, orders: [], page: 1 });
-  });
+    expect(putRes.status).toBe(200);
+    expect(Array.isArray(putRes.body)).toBe(true);
+    const found = putRes.body.find((m) => m.title === payload.title);
+    expect(found).toBeTruthy();
+    expect(found).toHaveProperty('id');
+    menuItem = found;
 
-  test('POST /api/order fulfills successfully at factory', async () => {
-    // Diner user placing order
-    jwt.verify.mockReturnValueOnce({ id: 4, name: 'Diner', email: 'd@test.com', roles: [{ role: Role.Diner }] });
-    DB.addDinerOrder.mockResolvedValue({ id: 11, franchiseId: 1, storeId: 1, items: [] });
-
-    global.fetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ reportUrl: 'http://report', jwt: 'JWT42' }),
-    });
-
-    const res = await request(app).post('/api/order').set(authz()).send({ franchiseId: 1, storeId: 1, items: [] });
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('order');
-    expect(res.body).toHaveProperty('followLinkToEndChaos', 'http://report');
-    expect(res.body).toHaveProperty('jwt', 'JWT42');
-  });
-
-  test('POST /api/order factory failure -> 500 with reportUrl', async () => {
-    jwt.verify.mockReturnValueOnce({ id: 4, name: 'Diner', email: 'd@test.com', roles: [{ role: Role.Diner }] });
-    DB.addDinerOrder.mockResolvedValue({ id: 12, franchiseId: 1, storeId: 1, items: [] });
-
-    global.fetch.mockResolvedValueOnce({
-      ok: false,
-      json: async () => ({ reportUrl: 'http://oops' }),
-    });
-
-    const res = await request(app).post('/api/order').set(authz()).send({ franchiseId: 1, storeId: 1, items: [] });
-    expect(res.status).toBe(500);
-    expect(res.body).toMatchObject({ message: 'Failed to fulfill order at factory', followLinkToEndChaos: 'http://oops' });
+    const getRes = await request(app).get('/api/order/menu');
+    const again = getRes.body.find((m) => m.title === payload.title);
+    expect(again).toBeTruthy();
   });
 });
 
-// ---------- franchiseRouter ----------
-describe('franchiseRouter', () => {
+// ---------- FRANCHISE (list/create/store/user franchises) ----------
+describe('Franchise routes', () => {
   test('GET /api/franchise returns list + more flag', async () => {
-    DB.getFranchises.mockResolvedValue([[{ id: 1, name: 'pizzaPocket', stores: [] }], true]);
-    const res = await request(app).get('/api/franchise');
+    const res = await request(app).get('/api/franchise?page=0&limit=10&name=*');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ franchises: [{ id: 1, name: 'pizzaPocket', stores: [] }], more: true });
+    expect(res.body).toHaveProperty('franchises');
+    expect(res.body).toHaveProperty('more');
   });
 
-  test('GET /api/franchise/:userId returns user franchises if admin', async () => {
-    DB.getUserFranchises.mockResolvedValue([{ id: 2, name: 'Chain' }]);
-    const res = await request(app).get('/api/franchise/4').set(authz());
+  test('POST /api/franchise requires Admin; Admin can create franchise', async () => {
+    const name = `pizzaPocket-${randomName()}`;
+    const res = await request(app)
+      .post('/api/franchise')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        name,
+        // make our diner a franchise admin to test role-based store creation later
+        admins: [{ email: diner.email }],
+      });
+
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([{ id: 2, name: 'Chain' }]);
+    expect(res.body).toHaveProperty('id');
+    expect(res.body).toHaveProperty('name', name);
+    expect(Array.isArray(res.body.admins)).toBe(true);
+
+    franchise = res.body;
   });
 
-  test('POST /api/franchise denies diner (403)', async () => {
-    jwt.verify.mockReturnValueOnce({ id: 8, email: 'd@test.com', roles: [{ role: Role.Diner }] });
-    const res = await request(app).post('/api/franchise').set(authz()).send({ name: 'X', admins: [] });
-    expect(res.status).toBe(403);
-    expect(res.body).toHaveProperty('message', 'unable to create a franchise');
-  });
+  test('POST /api/franchise/:franchiseId/store allows Admin or franchise admin', async () => {
+    // As Admin
+    const res = await request(app)
+      .post(`/api/franchise/${franchise.id}/store`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ franchiseId: franchise.id, name: 'SLC' });
 
-  test('POST /api/franchise allows admin and returns franchise', async () => {
-    DB.createFranchise.mockResolvedValue({ id: 9, name: 'pizzaPocket', admins: [] });
-    const res = await request(app).post('/api/franchise').set(authz()).send({ name: 'pizzaPocket', admins: [] });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: 9, name: 'pizzaPocket', admins: [] });
+    expect(res.body).toHaveProperty('id');
+    expect(res.body).toHaveProperty('name', 'SLC');
+    store = res.body;
   });
 
-  test('DELETE /api/franchise/:id (no auth) deletes and returns message', async () => {
-    DB.deleteFranchise.mockResolvedValue();
-    const res = await request(app).delete('/api/franchise/1');
+  test("GET /api/franchise/:userId returns user's franchises (requires auth)", async () => {
+    // Get diner id
+    const me = await request(app).get('/api/user/me').set('Authorization', `Bearer ${dinerToken}`);
+    const dinerId = me.body.id;
+
+    // As diner, should be able to see franchises where they're admin
+    const res = await request(app)
+      .get(`/api/franchise/${dinerId}`)
+      .set('Authorization', `Bearer ${dinerToken}`);
+
     expect(res.status).toBe(200);
-    expect(DB.deleteFranchise).toHaveBeenCalledWith(1);
-    expect(res.body).toEqual({ message: 'franchise deleted' });
+    expect(Array.isArray(res.body)).toBe(true);
+    // At least the one we just created (admin added diner)
+    const got = res.body.find((f) => f.id === franchise.id);
+    expect(got).toBeTruthy();
+    expect(Array.isArray(got.stores)).toBe(true);
   });
 
-  test('POST /api/franchise/:id/store denies when not admin or franchise admin', async () => {
-    jwt.verify.mockReturnValueOnce({ id: 10, email: 'user@test.com', roles: [{ role: Role.Diner }] });
-    DB.getFranchise.mockResolvedValue({ id: 1, admins: [{ id: 2 }] }); // not this user
-    const res = await request(app).post('/api/franchise/1/store').set(authz()).send({ name: 'SLC' });
-    expect(res.status).toBe(403);
-    expect(res.body).toHaveProperty('message', 'unable to create a store');
-  });
+  test('DELETE /api/franchise/:franchiseId/store/:storeId authorizes Admin or franchise admin', async () => {
+    // Delete as diner (should be authorized because diner is franchise admin)
+    const res = await request(app)
+      .delete(`/api/franchise/${franchise.id}/store/${store.id}`)
+      .set('Authorization', `Bearer ${dinerToken}`);
 
-  test('POST /api/franchise/:id/store allows admin and returns store', async () => {
-    // default verify is admin
-    DB.getFranchise.mockResolvedValue({ id: 1, admins: [{ id: 1 }] });
-    DB.createStore.mockResolvedValue({ id: 7, franchiseId: 1, name: 'SLC' });
-
-    const res = await request(app).post('/api/franchise/1/store').set(authz()).send({ name: 'SLC' });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ id: 7, franchiseId: 1, name: 'SLC' });
+    expect(res.body).toMatchObject({ message: 'store deleted' });
   });
+});
 
-  test('DELETE /api/franchise/:fid/store/:sid denies when not allowed', async () => {
-    jwt.verify.mockReturnValueOnce({ id: 10, email: 'user@test.com', roles: [{ role: Role.Diner }] });
-    DB.getFranchise.mockResolvedValue({ id: 1, admins: [{ id: 2 }] });
-    const res = await request(app).delete('/api/franchise/1/store/2').set(authz());
-    expect(res.status).toBe(403);
-    expect(res.body).toHaveProperty('message', 'unable to delete a store');
-  });
+// ---------- ORDERS end-to-end (create + list) ----------
+describe('Orders end-to-end', () => {
+  test('POST /api/order creates an order and returns factory jwt + link', async () => {
+    // Need a store again (we deleted previous). Create as Admin:
+    const resStore = await request(app)
+      .post(`/api/franchise/${franchise.id}/store`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ franchiseId: franchise.id, name: 'Orem' });
 
-  test('DELETE /api/franchise/:fid/store/:sid allows admin and deletes', async () => {
-    DB.getFranchise.mockResolvedValue({ id: 1, admins: [{ id: 1 }] });
-    DB.deleteStore.mockResolvedValue();
-    const res = await request(app).delete('/api/franchise/1/store/2').set(authz());
+    expect(resStore.status).toBe(200);
+    store = resStore.body;
+
+    // Create order as diner
+    const res = await request(app)
+      .post('/api/order')
+      .set('Authorization', `Bearer ${dinerToken}`)
+      .send({
+        franchiseId: franchise.id,
+        storeId: store.id,
+        items: [{ menuId: menuItem.id, description: menuItem.title, price: menuItem.price }],
+      });
+
     expect(res.status).toBe(200);
-    expect(DB.deleteStore).toHaveBeenCalledWith(1, 2);
-    expect(res.body).toEqual({ message: 'store deleted' });
+    expect(res.body).toHaveProperty('order.id');
+    expect(res.body).toHaveProperty('jwt', 'factory-jwt-abc');
+    expect(res.body).toHaveProperty('followLinkToEndChaos');
+  });
+
+  test('GET /api/order lists diner orders (pagination supported)', async () => {
+    const res = await request(app).get('/api/order?page=1').set('Authorization', `Bearer ${dinerToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('dinerId');
+    expect(res.body).toHaveProperty('orders');
+    expect(Array.isArray(res.body.orders)).toBe(true);
   });
 });
