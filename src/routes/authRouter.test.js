@@ -222,7 +222,6 @@ describe('Franchise routes', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({
         name,
-        // make our diner a franchise admin to test role-based store creation later
         admins: [{ email: diner.email }],
       });
 
