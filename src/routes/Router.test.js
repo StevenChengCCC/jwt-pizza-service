@@ -1,4 +1,6 @@
-// ---- Mocks ----
+/* eslint-env jest, node */
+
+// ---- DB & JWT mocks must be defined before requiring the app ----
 jest.mock('../database/database.js', () => {
     const Role = { Admin: 'admin', Franchisee: 'franchisee', Diner: 'diner' };
     const DB = {
