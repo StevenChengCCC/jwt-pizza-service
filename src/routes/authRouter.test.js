@@ -145,17 +145,23 @@ describe('User routes', () => {
   test('PUT /api/user/:userId lets user update self (and returns new token)', async () => {
     const meRes = await request(app).get('/api/user/me').set('Authorization', `Bearer ${dinerToken}`);
     const myId = meRes.body.id;
-
+  
     const newName = `diner-${randomName()}`;
+  
+    // IMPORTANT: include email so DB.updateUser can refetch the user
     const updateRes = await request(app)
       .put(`/api/user/${myId}`)
       .set('Authorization', `Bearer ${dinerToken}`)
-      .send({ name: newName });
-
+      .send({ name: newName, email: diner.email });
+  
     expect(updateRes.status).toBe(200);
     expect(updateRes.body.user).toHaveProperty('name', newName);
     expectValidJwt(updateRes.body.token);
+  
+    // Optional: use the new token for subsequent auth
+    dinerToken = updateRes.body.token;
   });
+  
 });
 
 // ---------- ORDER (menu + create order + list) ----------
