@@ -130,3 +130,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           echo "image=${ECR_REGISTRY}/jwt-pizza-service:${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy new container
+        run: |
+          aws ecs update-service --cluster jwt-pizza-service --service jwt-pizza-service --force-new-deployment
