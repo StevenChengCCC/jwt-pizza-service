@@ -311,3 +311,11 @@ describe('Orders end-to-end', () => {
     expect(Array.isArray(res.body.orders)).toBe(true);
   });
 });
+afterAll(async () => {
+  if (global.fetch && jest.isMockFunction(global.fetch)) {
+    jest.restoreAllMocks();
+  }
+  if (DB && typeof DB.close === 'function') {
+    await DB.close();
+  }
+});
