@@ -2,100 +2,113 @@
 const os = require('os');
 const config = require('./config');
 
-const basic = Buffer.from(config.metrics.apiKey, 'utf8').toString('base64');
-const SOURCE = config.metrics.source || 'jwt-pizza-service';
+// 读取 CI 注入的 metrics 配置：source / url / apiKey
+// apiKey = "实例ID:glc_token" —— 直接 Base64 后走 Basic 认证（等价于 curl -u）
+const SOURCE = (config.metrics && config.metrics.source) || 'jwt-pizza-service';
+const URL = (config.metrics && config.metrics.url) || '';
+const BASIC = config.metrics ? Buffer.from(config.metrics.apiKey, 'utf8').toString('base64') : '';
 
-// ── 累计状态 ─────────────────────────────────────────────────────────
-const httpByKey = new Map();                // `${method}|${route}|${status}` → {count, latencyMs}
-const auth = { success: 0, failure: 0 };    // 认证结果
-let activeUsersSet = new Set();             // 周期内去重用户
-let pizzasSold = 0;
-let pizzaFailures = 0;
-let revenueCents = 0;
-let pizzaCreationLatencyTotalMs = 0;
+// ===== 计数与状态（TA 风格字段 + 扩展）=====
+const state = {
+  // TA 风格（方法/总量/认证/延迟/活跃用户）
+  totalRequests: 0,
+  getRequests: 0,
+  postRequests: 0,
+  putRequests: 0,
+  deleteRequests: 0,
 
-function incHttp(method, route, status, latencyMs) {
-  const k = `${method}|${route}|${status}`;
-  const prev = httpByKey.get(k) || { count: 0, latencyMs: 0 };
-  prev.count += 1;
-  prev.latencyMs += latencyMs;
-  httpByKey.set(k, prev);
+  successfulAuth: 0,
+  failedAuth: 0,
+
+  msRequestLatency: 0,  // 最近一次请求延迟（ms）
+  activeUsers: 0,       // 周期窗口内活跃人数（gauge）
+
+  // 端点维度累计（用于计算“服务端点平均延迟”）
+  // key = `${method}|${route}|${status}`
+  endpoint: new Map(),
+
+  // 订单（销量/失败/营收/制作总延迟）
+  pizzasSold: 0,
+  pizzaFailures: 0,
+  revenueCents: 0,
+  pizzaCreationLatencyTotalMs: 0,
+};
+
+// ===== 提供给业务/路由调用的函数（与 TA 示例一致）=====
+function incrementTotalRequests() { state.totalRequests++; }
+function incrementGetRequests()   { state.getRequests++; }
+function incrementPostRequests()  { state.postRequests++; }
+function incrementPutRequests()   { state.putRequests++; }
+function incrementDeleteRequests(){ state.deleteRequests++; }
+
+function incrementSuccessfulAuth(){ state.successfulAuth++; }
+function incrementFailedAuth()    { state.failedAuth++; }
+
+function updateMsRequestLatency(ms) {
+  if (ms && ms !== 0) state.msRequestLatency = ms;
 }
+function incrementActiveUsers()   { state.activeUsers++; }
 
-// ── 对外 API ────────────────────────────────────────────────────────
-function authAttempt(ok) {
-  if (ok) auth.success += 1;
-  else auth.failure += 1;
-}
-
-function pizzaPurchase(ok, latencyMs, priceCents) {
-  if (ok) {
-    pizzasSold += 1;
-    revenueCents += Math.max(0, priceCents || 0);
+// 订单指标
+function pizzaPurchase(success, latencyMs, priceCents) {
+  if (success) {
+    state.pizzasSold += 1;
+    state.revenueCents += Math.max(0, priceCents || 0);
   } else {
-    pizzaFailures += 1;
+    state.pizzaFailures += 1;
   }
-  if (latencyMs != null) pizzaCreationLatencyTotalMs += latencyMs;
+  if (latencyMs != null) state.pizzaCreationLatencyTotalMs += latencyMs;
 }
 
-// Express 中间件：请求追踪
+// ===== Express 中间件：端点维度统计 =====
 function requestTracker(req, res, next) {
   const start = process.hrtime.bigint();
-
-  // 如果 setAuthUser 放了 req.user，这里记录活跃用户
-  if (req.user && (req.user.id || req.user.sub)) {
-    activeUsersSet.add(String(req.user.id || req.user.sub));
-  }
 
   res.on('finish', () => {
     const end = process.hrtime.bigint();
     const ms = Number(end - start) / 1e6;
-    const method = (req.method || 'GET').toUpperCase();
+
+    // 总量/方法
+    incrementTotalRequests();
+    const m = (req.method || 'GET').toUpperCase();
+    if (m === 'GET') incrementGetRequests();
+    else if (m === 'POST') incrementPostRequests();
+    else if (m === 'PUT') incrementPutRequests();
+    else if (m === 'DELETE') incrementDeleteRequests();
+
+    // 端点维度（路由/状态）
     const route = (req.route && req.route.path) || req.originalUrl || req.path || 'unknown';
     const status = res.statusCode || 0;
-    incHttp(method, route, status, ms);
+    const key = `${m}|${route}|${status}`;
+    const prev = state.endpoint.get(key) || { count: 0, latencyMs: 0 };
+    prev.count += 1;
+    prev.latencyMs += ms;
+    state.endpoint.set(key, prev);
 
-    // 把 /api/auth* 访问计入认证尝试
-    if (/^\/api\/auth\b/i.test(route)) {
-      authAttempt(status >= 200 && status < 300);
-    }
+    updateMsRequestLatency(ms);
   });
 
   next();
 }
 
-// ── 系统 gauge ──────────────────────────────────────────────────────
-function getCpuPercent() {
+// ===== 系统 gauge 指标 =====
+function cpuPercent() {
   const cpuUsage = os.loadavg()[0] / os.cpus().length;
   return Math.round(cpuUsage * 100);
 }
-function getMemPercent() {
+function memoryPercent() {
   const total = os.totalmem();
   const free = os.freemem();
   return Math.round(((total - free) / total) * 100);
 }
 
-// ── OTLP/HTTP JSON ──────────────────────────────────────────────────
-function otlpGauge(name, value, unit = '') {
+// ===== OTLP/HTTP JSON builders =====
+function gauge(name, value, unit = '', attrs = []) {
   return {
     name, unit,
     gauge: {
       dataPoints: [{
-        asInt: value,
-        timeUnixNano: Date.now() * 1e9,
-        attributes: [{ key: 'source', value: { stringValue: SOURCE } }],
-      }],
-    },
-  };
-}
-function otlpSum(name, value, unit = '', attrs = []) {
-  return {
-    name, unit,
-    sum: {
-      aggregationTemporality: 'AGGREGATION_TEMPORALITY_CUMULATIVE',
-      isMonotonic: true,
-      dataPoints: [{
-        asInt: value,
+        asInt: Math.max(0, Math.round(value)),
         timeUnixNano: Date.now() * 1e9,
         attributes: [{ key: 'source', value: { stringValue: SOURCE } }, ...attrs],
       }],
@@ -103,64 +116,115 @@ function otlpSum(name, value, unit = '', attrs = []) {
   };
 }
 
-async function push(metricsArr) {
+function sumCounter(name, value, unit = '', attrs = []) {
+  return {
+    name, unit,
+    sum: {
+      aggregationTemporality: 'AGGREGATION_TEMPORALITY_CUMULATIVE',
+      isMonotonic: true,
+      dataPoints: [{
+        asInt: Math.max(0, Math.round(value)),
+        timeUnixNano: Date.now() * 1e9,
+        attributes: [{ key: 'source', value: { stringValue: SOURCE } }, ...attrs],
+      }],
+    },
+  };
+}
+
+function buildAllMetrics() {
+  const arr = [];
+
+  // HTTP by method + total（按 required 指标）
+  arr.push(sumCounter('http_requests_total', state.totalRequests, '1', [{ key: 'method', value: { stringValue: 'ALL' } }]));
+  arr.push(sumCounter('http_requests_total', state.getRequests,   '1', [{ key: 'method', value: { stringValue: 'GET' } }]));
+  arr.push(sumCounter('http_requests_total', state.postRequests,  '1', [{ key: 'method', value: { stringValue: 'POST' } }]));
+  arr.push(sumCounter('http_requests_total', state.putRequests,   '1', [{ key: 'method', value: { stringValue: 'PUT' } }]));
+  arr.push(sumCounter('http_requests_total', state.deleteRequests,'1', [{ key: 'method', value: { stringValue: 'DELETE' } }]));
+
+  // 端点维度：请求总数 + 端点累计延迟（用于平均延迟）
+  for (const [key, v] of state.endpoint.entries()) {
+    const [method, route, status] = key.split('|');
+    const dims = [
+      { key: 'method', value: { stringValue: method } },
+      { key: 'route',  value: { stringValue: route } },
+      { key: 'status', value: { stringValue: status } },
+    ];
+    arr.push(sumCounter('http_requests_total', v.count, '1', dims));
+    arr.push(sumCounter('endpoint_latency_milliseconds_total', Math.round(v.latencyMs), 'ms', dims));
+  }
+
+  // 活跃用户（gauge）
+  arr.push(gauge('active_users', state.activeUsers, '1'));
+
+  // 认证尝试
+  arr.push(sumCounter('auth_attempts_total', state.successfulAuth, '1', [{ key: 'outcome', value: { stringValue: 'success' } }]));
+  arr.push(sumCounter('auth_attempts_total', state.failedAuth,     '1', [{ key: 'outcome', value: { stringValue: 'failure' } }]));
+
+  // 系统 gauge
+  arr.push(gauge('cpu_percent', cpuPercent(), '%'));
+  arr.push(gauge('memory_percent', memoryPercent(), '%'));
+
+  // 订单
+  arr.push(sumCounter('pizzas_sold_total', state.pizzasSold, '1'));
+  arr.push(sumCounter('pizza_failures_total', state.pizzaFailures, '1'));
+  arr.push(sumCounter('revenue_cents_total', state.revenueCents, 'cents'));
+  arr.push(sumCounter('pizza_creation_latency_milliseconds_total', Math.round(state.pizzaCreationLatencyTotalMs), 'ms'));
+
+  return arr;
+}
+
+async function send(metricsArr) {
+  if (!URL || !BASIC) return;
   if (process.env.NODE_ENV === 'test') return; // 测试阶段不外发
   const body = JSON.stringify({ resourceMetrics: [{ scopeMetrics: [{ metrics: metricsArr }] }] });
-  const res = await fetch(config.metrics.url, {
+
+  const res = await fetch(URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Basic ${basic}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Basic ${BASIC}` },
     body,
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    console.error('Failed to push metrics', res.status, text);
+    const t = await res.text().catch(() => '');
+    console.error('Failed to push metrics', res.status, t);
   }
 }
 
-// ── 周期上报 ────────────────────────────────────────────────────────
-let timer = null;
-function start(periodMs = 1000) {
-  if (timer) return;
-  timer = setInterval(() => {
+// 仅清“活跃用户窗口”，其余 counter 为 cumulative
+function clearWindow() {
+  state.activeUsers = 0;
+}
+
+function sendMetricsPeriodically(periodMs) {
+  setInterval(() => {
     try {
-      const arr = [];
-
-      // 系统 & 活跃用户
-      arr.push(otlpGauge('cpu_percent', getCpuPercent(), '%'));
-      arr.push(otlpGauge('memory_percent', getMemPercent(), '%'));
-      arr.push(otlpGauge('active_users', activeUsersSet.size, '1'));
-
-      // HTTP 请求与端点总延迟（带维度）
-      for (const [k, v] of httpByKey.entries()) {
-        const [method, route, status] = k.split('|');
-        const dims = [
-          { key: 'method', value: { stringValue: method } },
-          { key: 'route',  value: { stringValue: route } },
-          { key: 'status', value: { stringValue: status } },
-        ];
-        arr.push(otlpSum('http_requests_total', v.count, '1', dims));
-        arr.push(otlpSum('endpoint_latency_milliseconds_total', Math.round(v.latencyMs), 'ms', dims));
-      }
-
-      // 认证
-      arr.push(otlpSum('auth_attempts_total', auth.success, '1', [{ key: 'outcome', value: { stringValue: 'success' } }]));
-      arr.push(otlpSum('auth_attempts_total', auth.failure, '1', [{ key: 'outcome', value: { stringValue: 'failure' } }]));
-
-      // 订单
-      arr.push(otlpSum('pizzas_sold_total', pizzasSold, '1'));
-      arr.push(otlpSum('pizza_failures_total', pizzaFailures, '1'));
-      arr.push(otlpSum('revenue_cents_total', revenueCents, 'cents'));
-      arr.push(otlpSum('pizza_creation_latency_milliseconds_total', Math.round(pizzaCreationLatencyTotalMs), 'ms'));
-
-      push(arr).catch(console.error);
-
-      // 活跃用户窗口清零（按周期统计）
-      activeUsersSet = new Set();
-      // 其余 counter 保持累计
+      const arr = buildAllMetrics();
+      clearWindow();
+      send(arr).catch(() => {});
     } catch (e) {
-      console.error('Error building metrics', e);
+      console.log('Error sending metrics', e);
     }
   }, periodMs);
 }
 
-module.exports = { start, requestTracker, authAttempt, pizzaPurchase };
+module.exports = {
+  // TA 风格 API
+  incrementTotalRequests,
+  incrementGetRequests,
+  incrementPostRequests,
+  incrementPutRequests,
+  incrementDeleteRequests,
+  incrementSuccessfulAuth,
+  incrementFailedAuth,
+  updateMsRequestLatency,
+  incrementActiveUsers,
+
+  // 订单
+  pizzaPurchase,
+
+  // 中间件 & 启动
+  requestTracker,
+  sendMetricsPeriodically,
+  start(periodMs = 1000) {
+    this.sendMetricsPeriodically(periodMs);
+  },
+};
