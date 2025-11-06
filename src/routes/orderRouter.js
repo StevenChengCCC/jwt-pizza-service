@@ -78,32 +78,30 @@ orderRouter.post(
   '/',
   authRouter.authenticateToken,
   asyncHandler(async (req, res) => {
-    const t0 = process.hrtime.bigint();
+    const orderReq = req.body;
+
+    const tFactoryStart = process.hrtime.bigint();
     let priceCents = 0;
-    try {
-      const items = (req.body && req.body.items) || [];
-      for (const it of items) {
+    if (orderReq && Array.isArray(orderReq.items)) {
+      for (const it of orderReq.items) {
         if (typeof it.price === 'number') {
           priceCents += Math.round(it.price * 100);
         }
       }
-    } catch {
     }
-
-    const orderReq = req.body;
     const order = await DB.addDinerOrder(req.user, orderReq);
+
     const r = await fetch(`${config.factory.url}/api/order`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', authorization: `Bearer ${config.factory.apiKey}` },
       body: JSON.stringify({ diner: { id: req.user.id, name: req.user.name, email: req.user.email }, order }),
     });
+
     const j = await r.json();
 
-    try {
-      const latencyMs = Number(process.hrtime.bigint() - t0) / 1e6;
-      metrics.pizzaPurchase(r.ok, latencyMs, r.ok ? priceCents : 0);
-    } catch {
-    }
+    const latencyMs = Number(process.hrtime.bigint() - tFactoryStart) / 1e6;
+    metrics.pizzaPurchase(r.ok, latencyMs, r.ok ? priceCents : 0);
+
     if (r.ok) {
       res.send({ order, followLinkToEndChaos: j.reportUrl, jwt: j.jwt });
     } else {
