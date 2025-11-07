@@ -1,4 +1,3 @@
-// src/metrics.js
 const os = require('os');
 const config = require('./config');
 
@@ -38,6 +37,9 @@ const state = {
   pizzaCreationLatencyTotalMs: 0,
 };
 
+console.log("[metrics] url=", config.metrics?.url, 
+            "enabled=", !!(config.metrics?.url && config.metrics?.apiKey),
+            "source=", config.metrics?.source);
 // ====== TA 风格：增量函数（按你助教示例命名）======
 function incrementTotalRequests() { state.totalRequests += 1; }
 function incrementGetRequests()   { state.getRequests   += 1; }
@@ -226,7 +228,6 @@ function sendMetricsPeriodically(periodMs) {
     }
   }, periodMs);
 }
-console.log("[metrics] url=", config.metrics?.url, "enabled=", !!(config.metrics?.url && config.metrics?.apiKey));
 // ====== 导出 API =======
 module.exports = {
   // TA 风格函数
