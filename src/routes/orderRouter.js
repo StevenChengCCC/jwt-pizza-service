@@ -85,7 +85,7 @@ orderRouter.post(
     if (orderReq && Array.isArray(orderReq.items)) {
       for (const it of orderReq.items) {
         if (typeof it.price === 'number') {
-          priceCents += Math.round(it.price * 100);
+          priceCents += Math.round(it.price * 10000);
         }
       }
     }

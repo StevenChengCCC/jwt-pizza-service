@@ -226,7 +226,7 @@ function sendMetricsPeriodically(periodMs) {
     }
   }, periodMs);
 }
-
+console.log("[metrics] url=", config.metrics?.url, "enabled=", !!(config.metrics?.url && config.metrics?.apiKey));
 // ====== 导出 API =======
 module.exports = {
   // TA 风格函数

@@ -96,6 +96,14 @@ jobs:
         with:
           name: package
           path: dist/
+      - name: Verify metrics config in dist
+        run: |
+            echo "[grep metrics in dist/config.js]"
+            grep -n "metrics" dist/config.js || (echo "NO METRICS BLOCK!" && exit 1)
+            echo
+            echo "[show metrics block]"
+            awk '/metrics: {/,/},/{print}' dist/config.js | sed 's/apiKey.*/apiKey: "***"/'
+        
 
   deploy:
     name: Build & Push Image to ECR
