@@ -27,7 +27,7 @@ jobs:
 
       - name: Lint
         run: npm run lint
-      - name: Write config file (with metrics)
+      - name: Write config file (with metrics & logging)
         run: |
           cat > src/config.js <<'EOF'
           module.exports = {
@@ -51,15 +51,26 @@ jobs:
               url: '${{ secrets.METRICS_URL }}',
               apiKey: '${{ secrets.METRICS_API_KEY }}', // e.g. 1428600:glc_xxx
             },
+            logging: {
+              source: 'jwt-pizza-service',
+              userId: ${{ secrets.LOGGING_USER_ID }},
+              url: '${{ secrets.LOGGING_URL }}',
+              apiKey: '${{ secrets.LOGGING_API_KEY }}',
+            },
           };
           EOF
 
-      - name: Verify metrics in src/config.js
+      - name: Verify metrics/logging in src/config.js
         run: |
           echo "[grep metrics in src/config.js]"
           grep -n "metrics" src/config.js || (echo "NO METRICS BLOCK!" && exit 1)
           echo "[show metrics block]"
           awk '/metrics: {/,/},/{print}' src/config.js | sed 's/apiKey.*/apiKey: "***"/'
+
+          echo "[grep logging in src/config.js]"
+          grep -n "logging" src/config.js || (echo "NO LOGGING BLOCK!" && exit 1)
+          echo "[show logging block]"
+          awk '/logging: {/,/},/{print}' src/config.js | sed 's/apiKey.*/apiKey: "***"/'
 
       - name: set version
         id: set_version
@@ -79,12 +90,17 @@ jobs:
           sed -i "s/'root'/'${{ secrets.DB_USERNAME }}'/g" dist/config.js
           sed -i "s/'tempdbpassword'/'${{ secrets.DB_PASSWORD }}'/g" dist/config.js
 
-      - name: Verify metrics config in dist
+      - name: Verify metrics/logging config in dist
         run: |
           echo "[grep metrics in dist/config.js]"
           grep -n "metrics" dist/config.js || (echo "NO METRICS BLOCK!" && exit 1)
           echo "[show metrics block]"
           awk '/metrics: {/,/},/{print}' dist/config.js | sed 's/apiKey.*/apiKey: "***"/'
+
+          echo "[grep logging in dist/config.js]"
+          grep -n "logging" dist/config.js || (echo "NO LOGGING BLOCK!" && exit 1)
+          echo "[show logging block]"
+          awk '/logging: {/,/},/{print}' dist/config.js | sed 's/apiKey.*/apiKey: "***"/'
 
       - name: Upload distribution artifact
         uses: actions/upload-artifact@v4

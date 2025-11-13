@@ -29,7 +29,19 @@ orderRouter.docs = [
     requiresAuth: true,
     description: 'Get the orders for the authenticated user',
     example: `curl -X GET localhost:3000/api/order  -H 'Authorization: Bearer tttttt'`,
-    response: { dinerId: 4, orders: [{ id: 1, franchiseId: 1, storeId: 1, date: '2024-06-05T05:14:40.000Z', items: [{ id: 1, menuId: 1, description: 'Veggie', price: 0.05 }] }], page: 1 },
+    response: {
+      dinerId: 4,
+      orders: [
+        {
+          id: 1,
+          franchiseId: 1,
+          storeId: 1,
+          date: '2024-06-05T05:14:40.000Z',
+          items: [{ id: 1, menuId: 1, description: 'Veggie', price: 0.05 }],
+        },
+      ],
+      page: 1,
+    },
   },
   {
     method: 'POST',
@@ -49,7 +61,6 @@ orderRouter.get(
   })
 );
 
-// addMenuItem
 orderRouter.put(
   '/menu',
   authRouter.authenticateToken,
@@ -64,7 +75,6 @@ orderRouter.put(
   })
 );
 
-// getOrders
 orderRouter.get(
   '/',
   authRouter.authenticateToken,
@@ -73,7 +83,6 @@ orderRouter.get(
   })
 );
 
-// createOrder
 orderRouter.post(
   '/',
   authRouter.authenticateToken,

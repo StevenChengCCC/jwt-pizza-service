@@ -6,6 +6,7 @@ const userRouter = require('./routes/userRouter.js');
 const version = require('./version.json');
 const config = require('./config.js');
 const metrics = require('./metrics.js');
+const logger = require('./logger.js');
 
 const app = express();
 app.use(express.json());
@@ -28,6 +29,8 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use(logger.httpLogger);
+
 app.use(metrics.requestTracker);
 
 metrics.start(1000);
@@ -35,35 +38,42 @@ metrics.start(1000);
 const apiRouter = express.Router();
 app.use('/api', apiRouter);
 
-// ===== 自检路由（打通即 200；验证后可删）=====
 apiRouter.get('/metrics/ping', async (req, res) => {
   try {
     const MC = config.metrics;
     if (!MC?.url || !MC?.apiKey) return res.status(500).send('missing metrics config');
 
     const body = JSON.stringify({
-      resourceMetrics: [{
-        scopeMetrics: [{
-          metrics: [{
-            name: 'ping',
-            unit: '1',
-            gauge: {
-              dataPoints: [{
-                asInt: 1,
-                timeUnixNano: (BigInt(Date.now()) * 1000000n).toString(),
-                attributes: [{ key: 'source', value: { stringValue: MC.source || 'jwt-pizza-service' } }]
-              }]
-            }
-          }]
-        }]
-      }]
+      resourceMetrics: [
+        {
+          scopeMetrics: [
+            {
+              metrics: [
+                {
+                  name: 'ping',
+                  unit: '1',
+                  gauge: {
+                    dataPoints: [
+                      {
+                        asInt: 1,
+                        timeUnixNano: (BigInt(Date.now()) * 1000000n).toString(),
+                        attributes: [{ key: 'source', value: { stringValue: MC.source || 'jwt-pizza-service' } }],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
     });
 
     const basic = Buffer.from(MC.apiKey.trim(), 'utf8').toString('base64');
     const r = await fetch(MC.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Basic ${basic}` },
-      body
+      body,
     });
     const txt = await r.text();
     res.status(r.ok ? 200 : 500).send(r.status + ' ' + txt);
@@ -94,6 +104,16 @@ app.use('*', (req, res) => {
 });
 
 app.use((err, req, res, next) => {
+  try {
+    logger.logError(err, {
+      path: req.originalUrl,
+      method: req.method,
+      statusCode: err.statusCode ?? 500,
+    });
+  } catch (e) {
+    console.error('[logger] error while logging error', e);
+  }
+
   res.status(err.statusCode ?? 500).json({ message: err.message, stack: err.stack });
   next();
 });
