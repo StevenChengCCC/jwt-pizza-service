@@ -211,7 +211,7 @@ module.exports = {
   pizzaPurchase,
   requestTracker,
   sendMetricsPeriodically,
-  start(periodMs = 1000) {
+  start(periodMs = 10000) {
     sendMetricsPeriodically(periodMs);
   },
 };

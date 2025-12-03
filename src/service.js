@@ -33,7 +33,7 @@ app.use(logger.httpLogger);
 
 app.use(metrics.requestTracker);
 
-metrics.start(1000);
+metrics.start(10000);
 
 const apiRouter = express.Router();
 app.use('/api', apiRouter);
