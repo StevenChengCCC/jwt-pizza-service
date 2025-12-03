@@ -152,15 +152,17 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: jwt-pizza-service
-          VERSION: ${{ env.VERSION }}
+          VERSION: ${{ github.sha }}
         run: |
+          echo "Building version: $VERSION"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:${VERSION} \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:${VERSION}" \
             --push \
             dist
 
+            
       - name: Set image output
         id: image_out
         env:
