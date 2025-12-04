@@ -1,17 +1,14 @@
 const os = require('os');
 const config = require('./config');
 
-const METRICS_CONFIG = config.metrics || {};
-const SOURCE = process.env.METRICS_SOURCE || METRICS_CONFIG.source || 'jwt-pizza-service';
-const URL = process.env.METRICS_URL || METRICS_CONFIG.url || '';
-const API_KEY = process.env.METRICS_API_KEY || METRICS_CONFIG.apiKey || '';
-const BASIC = API_KEY ? Buffer.from(API_KEY, 'utf8').toString('base64') : '';
+const SOURCE = (config.metrics && config.metrics.source) || 'jwt-pizza-service';
+const URL = (config.metrics && config.metrics.url) || '';
+const BASIC = config.metrics ? Buffer.from(config.metrics.apiKey, 'utf8').toString('base64') : '';
 
 const state = {
   totalRequests: 0,
   getRequests: 0,
   postRequests: 0,
-// ... [rest of state remains unchanged]
   putRequests: 0,
   deleteRequests: 0,
 
@@ -30,10 +27,9 @@ const state = {
   pizzaCreationLatencyTotalMs: 0,
 };
 
-// 确保这里的 console.log 也使用新的变量名
-console.log("[metrics] url=", URL, 
-            "enabled=", !!(URL && API_KEY),
-            "source=", SOURCE);
+console.log("[metrics] url=", config.metrics?.url, 
+            "enabled=", !!(config.metrics?.url && config.metrics?.apiKey),
+            "source=", config.metrics?.source);
 function incrementTotalRequests() { state.totalRequests += 1; }
 function incrementGetRequests()   { state.getRequests   += 1; }
 function incrementPostRequests()  { state.postRequests  += 1; }
