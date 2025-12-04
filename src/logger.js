@@ -1,10 +1,18 @@
 const config = require('./config');
 
 // ---- Loki config ----
-const LOG = config.logging || {};
-const LOKI_URL = LOG.url || ''; 
-const LOKI_BEARER = LOG.userId && LOG.apiKey ? `${LOG.userId}:${LOG.apiKey}` : '';
-const SOURCE = LOG.source || 'jwt-pizza-service';
+const LOG_CONFIG = config.logging || {};
+// 优先从环境变量读取
+const LOKI_URL = process.env.LOGGING_URL || LOG_CONFIG.url || ''; 
+const USER_ID = process.env.LOGGING_USER_ID || LOG_CONFIG.userId || '';
+const API_KEY = process.env.LOGGING_API_KEY || LOG_CONFIG.apiKey || '';
+const LOKI_BEARER = USER_ID && API_KEY ? `${USER_ID}:${API_KEY}` : '';
+
+const FINAL_USER_ID = process.env.LOGGING_USER_ID || LOG_CONFIG.userId;
+const FINAL_API_KEY = process.env.LOGGING_API_KEY || LOG_CONFIG.apiKey;
+const FINAL_LOKI_BEARER = FINAL_USER_ID && FINAL_API_KEY ? `${FINAL_USER_ID}:${FINAL_API_KEY}` : '';
+
+const SOURCE = process.env.LOGGING_SOURCE || LOG_CONFIG.source || 'jwt-pizza-service';
 const ENV = process.env.NODE_ENV || 'production';
 
 const QUEUE = [];
@@ -50,7 +58,7 @@ function enqueue(streamLabels, lineObj) {
 }
 
 async function flush() {
-  if (!LOKI_URL || !LOKI_BEARER) return;
+  if (!LOKI_URL || !FINAL_LOKI_BEARER) return;
   if (flushing || QUEUE.length === 0) return;
   flushing = true;
 
@@ -72,7 +80,8 @@ async function flush() {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${LOKI_BEARER}`,
+        // Loki 的 Basic Auth header 格式
+        Authorization: `Basic ${Buffer.from(FINAL_LOKI_BEARER, 'utf8').toString('base64')}`,
       },
       body: JSON.stringify(payload),
     });
